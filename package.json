@@ -1,0 +1,19 @@
+{
+  "name": "task-manager-api",
+  "version": "1.0.0",
+  "description": "RESTful Task Management API - CHARUSAT FTE ITUE301 Practical 4",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "watch-push": "node auto-push.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^4.19.2",
+    "mongoose": "^9.9.1"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^11.2.0"
+  }
+}
