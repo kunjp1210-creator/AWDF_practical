@@ -40,8 +40,15 @@ const startDatabase = async () => {
 };
 startDatabase();
 
-// Import Mongoose Schema model
+// Import Mongoose Schema models
 const Task = require('./models/Task');
+const User = require('./models/User');
+
+// Import authentication & validation middlewares
+const auth = require('./middleware/auth');
+const { validateRegister, validateLogin, validateTaskInput } = require('./middleware/validator');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 // 1. Global Request Logging Middleware
 app.use((req, res, next) => {
@@ -76,25 +83,118 @@ const validateTaskId = (req, res, next) => {
   next();
 };
 
+// --- Authentication Endpoints ---
+
+// POST /register - Register a new user
+app.post('/register', validateRegister, async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      return res.status(400).json({
+        error: 'Conflict Error',
+        messages: ['Email address is already registered.']
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = await User.create({
+      email,
+      password: hashedPassword
+    });
+
+    console.log(`[USER] Registered new user with ID ${newUser._id}`);
+    
+    const token = jwt.sign(
+      { id: newUser._id, email: newUser.email },
+      process.env.JWT_SECRET || 'secret_key',
+      { expiresIn: '1h' }
+    );
+
+    res.status(201).json({
+      message: 'Registration successful!',
+      token,
+      user: { id: newUser._id, email: newUser.email }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /login - Authenticate user & return JWT token
+app.post('/login', validateLogin, async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return res.status(401).json({
+        error: 'Unauthorized',
+        messages: ['Invalid email or password.']
+      });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(401).json({
+        error: 'Unauthorized',
+        messages: ['Invalid email or password.']
+      });
+    }
+
+    const token = jwt.sign(
+      { id: user._id, email: user.email },
+      process.env.JWT_SECRET || 'secret_key',
+      { expiresIn: '1h' }
+    );
+
+    res.status(200).json({
+      message: 'Login successful!',
+      token,
+      user: { id: user._id, email: user.email }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /me - Get currently logged-in user profile (Supplementary task)
+app.get('/me', auth, async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id).select('-password');
+    if (!user) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'User profile not found.'
+      });
+    }
+    res.status(200).json(user);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // --- REST Endpoints (CRUD) ---
 
-// GET /tasks - Retrieve all tasks
-app.get('/tasks', async (req, res, next) => {
+// GET /tasks - Retrieve all tasks for the logged-in user
+app.get('/tasks', auth, async (req, res, next) => {
   try {
-    const tasks = await Task.find();
+    const tasks = await Task.find({ user: req.user.id });
     res.status(200).json(tasks);
   } catch (err) {
     next(err);
   }
 });
 
-// GET /tasks/:id - Retrieve a single task by ID (Supplementary Task)
-app.get('/tasks/:id', validateTaskId, async (req, res, next) => {
+// GET /tasks/:id - Retrieve a single task by ID for the logged-in user
+app.get('/tasks/:id', auth, validateTaskId, async (req, res, next) => {
   try {
-    const task = await Task.findById(req.params.id);
+    const task = await Task.findOne({ _id: req.params.id, user: req.user.id });
     if (!task) {
       return res.status(404).json({
-        error: `Not Found. Task with ID ${req.params.id} does not exist.`
+        error: `Not Found`,
+        message: `Task with ID ${req.params.id} does not exist or you do not have permission to access it.`
       });
     }
     res.status(200).json(task);
@@ -103,70 +203,64 @@ app.get('/tasks/:id', validateTaskId, async (req, res, next) => {
   }
 });
 
-// POST /tasks - Create a new task in MongoDB
-app.post('/tasks', async (req, res, next) => {
+// POST /tasks - Create a new task in MongoDB linked to the logged-in user
+app.post('/tasks', auth, validateTaskInput, async (req, res, next) => {
   try {
     const { title, description, completed, priority } = req.body;
     
-    // Mongoose creation. Validations are evaluated here.
     const newTask = await Task.create({
       title,
       description,
       completed: completed !== undefined ? Boolean(completed) : false,
-      priority
+      priority,
+      user: req.user.id
     });
 
-    console.log(`[DATABASE] Created task in MongoDB with ID ${newTask._id}`);
+    console.log(`[DATABASE] Created task in MongoDB with ID ${newTask._id} for user ${req.user.id}`);
     res.status(201).json(newTask);
   } catch (err) {
     next(err);
   }
 });
 
-// PUT /tasks/:id - Update an existing task in MongoDB (with runValidators: true for schema constraints)
-app.put('/tasks/:id', validateTaskId, async (req, res, next) => {
+// PUT /tasks/:id - Update an existing task in MongoDB (linked to logged-in user)
+app.put('/tasks/:id', auth, validateTaskId, validateTaskInput, async (req, res, next) => {
   try {
     const { title, description, completed, priority } = req.body;
-    
-    // Validate empty title if sent
-    if (title !== undefined && (typeof title !== 'string' || title.trim() === '')) {
-      return res.status(400).json({
-        error: 'Validation Error',
-        messages: ['Task title is required and cannot be empty.']
-      });
-    }
 
-    const updatedTask = await Task.findByIdAndUpdate(
-      req.params.id,
+    const updatedTask = await Task.findOneAndUpdate(
+      { _id: req.params.id, user: req.user.id },
       { title, description, completed, priority },
       { new: true, runValidators: true }
     );
 
     if (!updatedTask) {
       return res.status(404).json({
-        error: `Not Found. Task with ID ${req.params.id} does not exist.`
+        error: `Not Found`,
+        message: `Task with ID ${req.params.id} does not exist or you do not have permission to modify it.`
       });
     }
 
-    console.log(`[DATABASE] Updated task in MongoDB with ID ${req.params.id}`);
+    console.log(`[DATABASE] Updated task in MongoDB with ID ${req.params.id} for user ${req.user.id}`);
     res.status(200).json(updatedTask);
   } catch (err) {
     next(err);
   }
 });
 
-// DELETE /tasks/:id - Delete a task from MongoDB
-app.delete('/tasks/:id', validateTaskId, async (req, res, next) => {
+// DELETE /tasks/:id - Delete a task from MongoDB (linked to logged-in user)
+app.delete('/tasks/:id', auth, validateTaskId, async (req, res, next) => {
   try {
-    const deletedTask = await Task.findByIdAndDelete(req.params.id);
+    const deletedTask = await Task.findOneAndDelete({ _id: req.params.id, user: req.user.id });
 
     if (!deletedTask) {
       return res.status(404).json({
-        error: `Not Found. Task with ID ${req.params.id} does not exist.`
+        error: `Not Found`,
+        message: `Task with ID ${req.params.id} does not exist or you do not have permission to delete it.`
       });
     }
 
-    console.log(`[DATABASE] Deleted task in MongoDB with ID ${req.params.id}`);
+    console.log(`[DATABASE] Deleted task in MongoDB with ID ${req.params.id} for user ${req.user.id}`);
     res.status(200).json({
       message: 'Task deleted successfully.',
       task: deletedTask
