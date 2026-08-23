@@ -11,6 +11,10 @@ const PORT = process.env.PORT || 5001;
 // Setup JSON parsing middleware
 app.use(express.json());
 
+// Enable CORS globally
+const cors = require('cors');
+app.use(cors());
+
 // Serve static dashboard files from the "public" folder
 app.use(express.static(path.join(__dirname, 'public')));
 
