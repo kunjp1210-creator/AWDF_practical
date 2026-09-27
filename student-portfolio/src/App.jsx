@@ -1,11 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import NavBar from './components/NavBar';
-import Home from './pages/Home';
-import Projects from './components/Projects';
-import Contact from './pages/Contact';
-import NotFound from './pages/NotFound';
 import Footer from './components/Footer';
+import LoadingFallback from './components/LoadingFallback';
+import { lazyWithDelay } from './utils/lazyWithDelay';
+
+// Route-Based Code Splitting via React.lazy with 300ms minimum delay fallback
+const Home = lazyWithDelay(() => import('./pages/Home'), 300);
+const Projects = lazyWithDelay(() => import('./components/Projects'), 300);
+const Contact = lazyWithDelay(() => import('./pages/Contact'), 300);
+const NotFound = lazyWithDelay(() => import('./pages/NotFound'), 300);
 
 function App() {
   const [isLightMode, setIsLightMode] = useState(false);
@@ -40,22 +44,25 @@ function App() {
   return (
     <>
       <NavBar isLightMode={isLightMode} toggleTheme={toggleTheme} />
-      <Routes>
-        <Route 
-          path="/" 
-          element={
-            <Home 
-              name={studentData.name} 
-              title={studentData.title} 
-              themeColor={studentData.themeColor} 
-              skills={studentData.skills} 
-            />
-          } 
-        />
-        <Route path="/projects" element={<Projects />} />
-        <Route path="/contact" element={<Contact />} />
-        <Route path="*" element={<NotFound />} />
-      </Routes>
+      {/* Route-level Suspense boundary with meaningful loading fallback */}
+      <Suspense fallback={<LoadingFallback message="Loading page module..." />}>
+        <Routes>
+          <Route 
+            path="/" 
+            element={
+              <Home 
+                name={studentData.name} 
+                title={studentData.title} 
+                themeColor={studentData.themeColor} 
+                skills={studentData.skills} 
+              />
+            } 
+          />
+          <Route path="/projects" element={<Projects />} />
+          <Route path="/contact" element={<Contact />} />
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </Suspense>
       <Footer />
     </>
   );

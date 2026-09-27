@@ -1,5 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, lazy, Suspense, memo, useCallback } from 'react';
 import { getTasks, createTask, updateTask, deleteTask, register, login, getMe } from '../api';
+import { lazyWithDelay } from '../utils/lazyWithDelay';
+
+// Supplementary Problem 1: Lazy load heavy analytical chart component on demand
+const TaskAnalyticsChart = lazyWithDelay(() => import('./TaskAnalyticsChart'), 250);
 
 // Inline Spinner Component
 function Spinner({ text }) {
@@ -28,6 +32,66 @@ function ErrorMessage({ message, onRetry }) {
   );
 }
 
+// Supplementary Problem 3: Memoized TaskItem to prevent unnecessary re-renders during parent state changes
+const TaskItem = memo(function TaskItem({ task, onToggle, onDelete }) {
+  return (
+    <div
+      className="task-row-card glass-panel"
+      style={{ opacity: task.isOptimistic ? 0.6 : 1 }}
+    >
+      <div className="task-checkbox-cell">
+        <input
+          type="checkbox"
+          checked={task.completed}
+          disabled={task.isOptimistic}
+          onChange={() => onToggle(task._id, task.completed)}
+          className="task-checker-input"
+        />
+      </div>
+
+      <div className="task-body-cell">
+        <div className="task-row-header">
+          <span className={`task-row-title ${task.completed ? 'completed' : ''}`}>
+            {task.title}
+          </span>
+          <span className={`priority-tag priority-${task.priority}`}>
+            {task.priority}
+          </span>
+          {task.isOptimistic && (
+            <span style={{ fontSize: '0.65rem', color: 'var(--accent-secondary)', fontStyle: 'italic' }}>
+              Saving...
+            </span>
+          )}
+        </div>
+        
+        <p className="task-row-description">
+          {task.description || 'No description provided.'}
+        </p>
+
+        <div className="task-meta-footer">
+          <span className="task-id-tag">
+            MongoDB ObjectId: {task._id}
+          </span>
+        </div>
+      </div>
+
+      <button
+        onClick={() => onDelete(task._id, task.title)}
+        disabled={task.isOptimistic}
+        className="task-delete-trigger"
+        title="Delete Task"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="3 6 5 6 21 6"></polyline>
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+          <line x1="10" y1="11" x2="10" y2="17"></line>
+          <line x1="14" y1="11" x2="14" y2="17"></line>
+        </svg>
+      </button>
+    </div>
+  );
+});
+
 // Main Projects Component
 function Projects() {
   // Authentication states
@@ -52,6 +116,9 @@ function Projects() {
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState('medium');
 
+  // Supplementary Feature: Toggle on-demand analytics chunk loading
+  const [showAnalytics, setShowAnalytics] = useState(false);
+
   // Trigger floating toast notifications
   const showToast = (text, type = 'success') => {
     const id = Date.now();
@@ -64,7 +131,6 @@ function Projects() {
   // Helper to handle authentication failures (expiry / malformed tokens)
   const handleAuthFailure = (err) => {
     if (err.status === 401) {
-      // Supplementary Task: Implement basic frontend handling for 401 responses
       localStorage.removeItem('jwt_token');
       setToken(null);
       setUser(null);
@@ -80,11 +146,9 @@ function Projects() {
     setLoading(true);
     setError(null);
     
-    // Fetch profile
     getMe()
       .then((profile) => {
         setUser(profile);
-        // Fetch tasks
         return getTasks();
       })
       .then((taskList) => {
@@ -161,7 +225,6 @@ function Projects() {
 
   // Handle Logout
   const handleLogout = () => {
-    // Supplementary Task: Add a logout mechanism that clears the token from the client
     localStorage.removeItem('jwt_token');
     setToken(null);
     setUser(null);
@@ -178,7 +241,6 @@ function Projects() {
     const taskDesc = description.trim();
     const taskPriority = priority;
 
-    // Create temporary optimistic task object
     const optimisticTask = {
       _id: 'optimistic-' + Date.now(),
       title: taskTitle,
@@ -188,36 +250,30 @@ function Projects() {
       isOptimistic: true
     };
 
-    // Optimistically update UI list
     setTasks((prev) => [...prev, optimisticTask]);
     showToast('Task added (Optimistic UI)...');
 
-    // Reset inputs
     setTitle('');
     setDescription('');
     setPriority('medium');
 
     createTask({ title: taskTitle, description: taskDesc, priority: taskPriority })
       .then((savedTask) => {
-        // Swap optimistic record for actual database entry
         setTasks((prev) =>
           prev.map((t) => (t._id === optimisticTask._id ? savedTask : t))
         );
         showToast('Document saved in MongoDB!');
       })
       .catch((err) => {
-        // Rollback
         setTasks((prev) => prev.filter((t) => t._id !== optimisticTask._id));
         handleAuthFailure(err);
       });
   };
 
-  // Toggle task completion (PUT /tasks/:id)
-  const handleToggleComplete = (id, currentCompletedStatus) => {
+  // Toggle task completion (PUT /tasks/:id) - Wrapped in useCallback for memoized child items
+  const handleToggleComplete = useCallback((id, currentCompletedStatus) => {
     const newCompletedStatus = !currentCompletedStatus;
-    const originalTasks = [...tasks];
 
-    // Optimistically update
     setTasks((prev) =>
       prev.map((t) => (t._id === id ? { ...t, completed: newCompletedStatus } : t))
     );
@@ -229,32 +285,36 @@ function Projects() {
       })
       .catch((err) => {
         // Rollback
-        setTasks(originalTasks);
+        setTasks((prev) =>
+          prev.map((t) => (t._id === id ? { ...t, completed: currentCompletedStatus } : t))
+        );
         handleAuthFailure(err);
       });
-  };
+  }, []);
 
-  // Delete task (DELETE /tasks/:id)
-  const handleDeleteTrigger = (id, taskTitle) => {
+  // Delete task (DELETE /tasks/:id) - Wrapped in useCallback for memoized child items
+  const handleDeleteTrigger = useCallback((id, taskTitle) => {
     if (!window.confirm(`Are you sure you want to permanently delete "${taskTitle}"?`)) {
       return;
     }
 
-    const originalTasks = [...tasks];
-
-    // Optimistically update
-    setTasks((prev) => prev.filter((t) => t._id !== id));
+    let deletedItem = null;
+    setTasks((prev) => {
+      deletedItem = prev.find((t) => t._id === id);
+      return prev.filter((t) => t._id !== id);
+    });
 
     deleteTask(id)
       .then(() => {
         showToast('Task deleted from MongoDB.');
       })
       .catch((err) => {
-        // Rollback
-        setTasks(originalTasks);
+        if (deletedItem) {
+          setTasks((prev) => [...prev, deletedItem]);
+        }
         handleAuthFailure(err);
       });
-  };
+  }, []);
 
   return (
     <section id="projects" className="container" style={{ minHeight: '80vh' }}>
@@ -347,7 +407,7 @@ function Projects() {
         <ErrorMessage message={error} onRetry={loadUserData} />
       ) : (
         <>
-          {/* User profile header (Supplementary Task: returns user details using decoded token) */}
+          {/* User profile header */}
           <div className="user-auth-header glass-panel">
             <div className="user-email-info">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--accent-secondary)' }}>
@@ -360,6 +420,27 @@ function Projects() {
               🚪 Log Out
             </button>
           </div>
+
+          {/* On-Demand Lazy Component: Analytics Toggle */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
+            <button
+              type="button"
+              onClick={() => setShowAnalytics((prev) => !prev)}
+              className="analytics-toggle-btn"
+            >
+              {showAnalytics ? '▲ Hide Analytics' : '📊 View Task Analytics (Lazy-Loaded)'}
+            </button>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+              {tasks.length} task{tasks.length === 1 ? '' : 's'} in database
+            </span>
+          </div>
+
+          {/* Suspense boundary for on-demand heavy component */}
+          {showAnalytics && (
+            <Suspense fallback={<Spinner text="Loading Analytics module chunk..." />}>
+              <TaskAnalyticsChart tasks={tasks} />
+            </Suspense>
+          )}
 
           {/* Add Task Form */}
           <div className="task-form-wrapper glass-panel">
@@ -412,61 +493,12 @@ function Projects() {
                 </div>
               ) : (
                 tasks.map((task) => (
-                  <div
+                  <TaskItem
                     key={task._id}
-                    className="task-row-card glass-panel"
-                    style={{ opacity: task.isOptimistic ? 0.6 : 1 }}
-                  >
-                    <div className="task-checkbox-cell">
-                      <input
-                        type="checkbox"
-                        checked={task.completed}
-                        disabled={task.isOptimistic}
-                        onChange={() => handleToggleComplete(task._id, task.completed)}
-                        className="task-checker-input"
-                      />
-                    </div>
-
-                    <div className="task-body-cell">
-                      <div className="task-row-header">
-                        <span className={`task-row-title ${task.completed ? 'completed' : ''}`}>
-                          {task.title}
-                        </span>
-                        <span className={`priority-tag priority-${task.priority}`}>
-                          {task.priority}
-                        </span>
-                        {task.isOptimistic && (
-                          <span style={{ fontSize: '0.65rem', color: 'var(--accent-secondary)', fontStyle: 'italic' }}>
-                            Saving...
-                          </span>
-                        )}
-                      </div>
-                      
-                      <p className="task-row-description">
-                        {task.description || 'No description provided.'}
-                      </p>
-
-                      <div className="task-meta-footer">
-                        <span className="task-id-tag">
-                          MongoDB ObjectId: {task._id}
-                        </span>
-                      </div>
-                    </div>
-
-                    <button
-                      onClick={() => handleDeleteTrigger(task._id, task.title)}
-                      disabled={task.isOptimistic}
-                      className="task-delete-trigger"
-                      title="Delete Task"
-                    >
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="3 6 5 6 21 6"></polyline>
-                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                        <line x1="10" y1="11" x2="10" y2="17"></line>
-                        <line x1="14" y1="11" x2="14" y2="17"></line>
-                      </svg>
-                    </button>
-                  </div>
+                    task={task}
+                    onToggle={handleToggleComplete}
+                    onDelete={handleDeleteTrigger}
+                  />
                 ))
               )}
             </div>
