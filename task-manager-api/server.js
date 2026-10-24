@@ -50,6 +50,13 @@ const { validateRegister, validateLogin, validateTaskInput } = require('./middle
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
+// Import In-Memory Caching Module (Practical 9: node-cache)
+const cache = require('./cache');
+
+// Import Event-Driven Architecture Modules (Practical 10: EventEmitter)
+const taskEvents = require('./events');
+require('./listeners'); // Register background event listeners at server boot
+
 // 1. Global Request Logging Middleware
 app.use((req, res, next) => {
   const timestamp = new Date().toISOString();
@@ -175,21 +182,45 @@ app.get('/me', auth, async (req, res, next) => {
   }
 });
 
-// --- REST Endpoints (CRUD) ---
+// --- REST Endpoints (CRUD with In-Memory node-cache) ---
 
-// GET /tasks - Retrieve all tasks for the logged-in user
+// GET /tasks - Retrieve all tasks for the logged-in user (with 60s caching)
 app.get('/tasks', auth, async (req, res, next) => {
   try {
+    const cacheKey = `tasks_${req.user.id}`;
+    const cachedTasks = cache.get(cacheKey);
+
+    if (cachedTasks !== undefined) {
+      console.log(`[CACHE HIT] Serving cached tasks for user ${req.user.id} (Key: ${cacheKey})`);
+      res.set('X-Cache', 'HIT');
+      return res.status(200).json(cachedTasks);
+    }
+
+    console.log(`[CACHE MISS] Querying MongoDB for tasks of user ${req.user.id}`);
     const tasks = await Task.find({ user: req.user.id });
+    
+    // Store in node-cache with default 60s TTL
+    cache.set(cacheKey, tasks);
+    res.set('X-Cache', 'MISS');
     res.status(200).json(tasks);
   } catch (err) {
     next(err);
   }
 });
 
-// GET /tasks/:id - Retrieve a single task by ID for the logged-in user
+// GET /tasks/:id - Retrieve a single task by ID for user (Supplementary Problem 1: Separate item cache)
 app.get('/tasks/:id', auth, validateTaskId, async (req, res, next) => {
   try {
+    const cacheKey = `task_${req.user.id}_${req.params.id}`;
+    const cachedTask = cache.get(cacheKey);
+
+    if (cachedTask !== undefined) {
+      console.log(`[CACHE HIT] Serving cached single task ${req.params.id} (Key: ${cacheKey})`);
+      res.set('X-Cache', 'HIT');
+      return res.status(200).json(cachedTask);
+    }
+
+    console.log(`[CACHE MISS] Querying MongoDB for single task ${req.params.id}`);
     const task = await Task.findOne({ _id: req.params.id, user: req.user.id });
     if (!task) {
       return res.status(404).json({
@@ -197,13 +228,17 @@ app.get('/tasks/:id', auth, validateTaskId, async (req, res, next) => {
         message: `Task with ID ${req.params.id} does not exist or you do not have permission to access it.`
       });
     }
+
+    // Cache individual task
+    cache.set(cacheKey, task);
+    res.set('X-Cache', 'MISS');
     res.status(200).json(task);
   } catch (err) {
     next(err);
   }
 });
 
-// POST /tasks - Create a new task in MongoDB linked to the logged-in user
+// POST /tasks - Create a new task in MongoDB & invalidate user's cached task list
 app.post('/tasks', auth, validateTaskInput, async (req, res, next) => {
   try {
     const { title, description, completed, priority } = req.body;
@@ -216,14 +251,32 @@ app.post('/tasks', auth, validateTaskInput, async (req, res, next) => {
       user: req.user.id
     });
 
+    // Invalidate cached task list so fresh data is immediately available
+    const cacheKey = `tasks_${req.user.id}`;
+    cache.del(cacheKey);
+    console.log(`[CACHE INVALIDATED] Evicted "${cacheKey}" on new task creation`);
+
     console.log(`[DATABASE] Created task in MongoDB with ID ${newTask._id} for user ${req.user.id}`);
+    
+    // Practical 10: Immediate API response with timestamp logging
+    const apiResponseTimestamp = new Date().toISOString();
+    console.log(`[API] ⚡ Response sent (201 Created) at ${apiResponseTimestamp} for task: "${newTask.title}"`);
     res.status(201).json(newTask);
+
+    // Practical 10: Emit task-created event asynchronously AFTER response is sent
+    taskEvents.emit('task-created', {
+      id: newTask._id,
+      title: newTask.title,
+      description: newTask.description,
+      priority: newTask.priority,
+      user: req.user.email || req.user.id
+    });
   } catch (err) {
     next(err);
   }
 });
 
-// PUT /tasks/:id - Update an existing task in MongoDB (linked to logged-in user)
+// PUT /tasks/:id - Update existing task & invalidate both list and item cache
 app.put('/tasks/:id', auth, validateTaskId, validateTaskInput, async (req, res, next) => {
   try {
     const { title, description, completed, priority } = req.body;
@@ -241,6 +294,11 @@ app.put('/tasks/:id', auth, validateTaskId, validateTaskInput, async (req, res, 
       });
     }
 
+    // Invalidate list cache and single-item cache
+    cache.del(`tasks_${req.user.id}`);
+    cache.del(`task_${req.user.id}_${req.params.id}`);
+    console.log(`[CACHE INVALIDATED] Evicted list and item cache for task ${req.params.id}`);
+
     console.log(`[DATABASE] Updated task in MongoDB with ID ${req.params.id} for user ${req.user.id}`);
     res.status(200).json(updatedTask);
   } catch (err) {
@@ -248,7 +306,7 @@ app.put('/tasks/:id', auth, validateTaskId, validateTaskInput, async (req, res, 
   }
 });
 
-// DELETE /tasks/:id - Delete a task from MongoDB (linked to logged-in user)
+// DELETE /tasks/:id - Delete task & invalidate both list and item cache
 app.delete('/tasks/:id', auth, validateTaskId, async (req, res, next) => {
   try {
     const deletedTask = await Task.findOneAndDelete({ _id: req.params.id, user: req.user.id });
@@ -260,14 +318,48 @@ app.delete('/tasks/:id', auth, validateTaskId, async (req, res, next) => {
       });
     }
 
+    // Invalidate list cache and single-item cache
+    cache.del(`tasks_${req.user.id}`);
+    cache.del(`task_${req.user.id}_${req.params.id}`);
+    console.log(`[CACHE INVALIDATED] Evicted list and item cache for deleted task ${req.params.id}`);
+
     console.log(`[DATABASE] Deleted task in MongoDB with ID ${req.params.id} for user ${req.user.id}`);
+    
+    // Practical 10: Immediate API response with timestamp logging
+    const apiResponseTimestamp = new Date().toISOString();
+    console.log(`[API] ⚡ Response sent (200 OK) at ${apiResponseTimestamp} for deleted task ID: ${deletedTask._id}`);
     res.status(200).json({
       message: 'Task deleted successfully.',
       task: deletedTask
     });
+
+    // Practical 10: Emit task-deleted event asynchronously AFTER response is sent
+    taskEvents.emit('task-deleted', {
+      id: deletedTask._id,
+      title: deletedTask.title,
+      user: req.user.email || req.user.id
+    });
   } catch (err) {
     next(err);
   }
+});
+
+// GET /cache-stats - Debug endpoint exposing cache telemetry (Supplementary Problem 2)
+app.get('/cache-stats', (req, res) => {
+  res.status(200).json({
+    status: 'success',
+    message: 'In-Memory Cache Telemetry (node-cache)',
+    data: cache.getStats()
+  });
+});
+
+// POST /cache-flush - Flush cache manually for benchmarking
+app.post('/cache-flush', (req, res) => {
+  cache.flush();
+  res.status(200).json({
+    message: 'Cache flushed successfully.',
+    stats: cache.getStats()
+  });
 });
 
 // Endpoint to deliberately trigger an error to test the global error handling middleware

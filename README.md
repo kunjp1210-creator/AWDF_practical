@@ -53,6 +53,117 @@ After Optimization (Route-Based Code Splitting):
 
 ---
 
+## Practical 9: In-Memory Caching and Query Optimization
+
+### 1. Caching & Invalidation Architecture
+
+```text
+GET /tasks request
+ │
+ ▼
+ Cache check (node-cache)
+ ├── HIT  ──► Return cached JSON immediately from RAM [Header: X-Cache: HIT] (~0.78 ms)
+ └── MISS ──► Query MongoDB ──► Store in cache (TTL: 60s) ──► Return JSON [Header: X-Cache: MISS] (~1.93 ms)
+
+POST / PUT / DELETE /tasks
+ │
+ ▼
+ Write to MongoDB ──► Invalidate cache key (tasks_${userId}, task_${userId}_${id})
+```
+
+### 2. Measured Response Time Comparison (Empirical Benchmark)
+
+Measured across 3 repeated runs on identical query sets using `benchmark-cache.js`:
+
+| Sample # | Uncached (MongoDB Query) | Cached (node-cache RAM) | Cache Status Header | Response Time Delta |
+| :--- | :--- | :--- | :--- | :--- |
+| **Sample 1** | **2.16 ms** | **0.75 ms** | `X-Cache: MISS` vs `HIT` | **2.88x faster** |
+| **Sample 2** | **1.83 ms** | **0.64 ms** | `X-Cache: MISS` vs `HIT` | **2.86x faster** |
+| **Sample 3** | **1.79 ms** | **0.95 ms** | `X-Cache: MISS` vs `HIT` | **1.88x faster** |
+| **Average** | **1.93 ms** | **0.78 ms** | - | **2.5x FASTER overall** |
+
+> In production network environments with disk I/O and remote database clusters, in-memory caching typically yields a **10x to 50x** reduction in API latency.
+
+### 3. Key Viva / Analysis Questions Answered
+
+1. **Why must the cache be invalidated on every write operation, and what would happen to data correctness if it were not?**
+   If the cache is not invalidated upon write operations (`POST`, `PUT`, `DELETE`), subsequent `GET` requests will serve outdated snapshot data stored in RAM until the 60-second TTL expires. The user would create, edit, or delete a task but still see stale data upon refreshing, completely violating read-your-writes data correctness.
+2. **What is a reasonable TTL in a task management context, and what trade-off does TTL length represent?**
+   A TTL of **30 to 60 seconds** is ideal. Because write invalidation proactively guarantees data freshness on user mutations, TTL serves as a safety fallback. The trade-off is **Data Freshness vs. Database Load**: shorter TTL guarantees fast convergence with out-of-band updates at the cost of more frequent database queries; longer TTL offloads database CPU and IOPS at the risk of serving stale data if external database mutations occur.
+3. **Why is in-memory caching (`node-cache`) not suitable for a multi-server/multi-instance deployment?**
+   `node-cache` stores items inside the process heap of a single Node.js runtime. If the application is scaled horizontally behind a round-robin load balancer (Instances A, B, and C):
+   - A user writes a task to Instance A (which invalidates Instance A's local cache).
+   - The user's next request routes to Instance B, which still retains the stale cached response in its memory.
+   For multi-instance deployments, a **distributed cache** such as **Redis** or **Memcached** is required so all instances read and invalidate against a single shared cache layer.
+
+### 4. Supplementary Features Implemented
+
+- **Separate Single-Task Caching (`GET /tasks/:id`)**: Cached under key `task_${userId}_${id}` with `X-Cache: HIT/MISS` headers.
+- **Cache Telemetry Debug Endpoint (`GET /cache-stats`)**: Exposes real-time hit counts, miss counts, hit ratio percentage, active keys, and standard TTL configuration.
+- **Cache Invalidation Verification**: Mutation creates new task and verifies subsequent fetch is a cache miss returning the fresh document list.
+
+---
+
+## Practical 10: Asynchronous Processing with Event-Driven Architecture
+
+### 1. Architecture: Synchronous Response vs. Asynchronous Event Pipeline
+
+```text
+POST /tasks request
+ │
+ ▼
+ Save task to MongoDB
+ │
+ ▼
+ API responds immediately (201 Created) ──► Client receives JSON (~6.89 ms HTTP round-trip)
+ │
+ ▼ (handled asynchronously, after response sent)
+ taskEvents.emit('task-created', taskData)
+ │
+ ▼
+ Notification Listener (listeners.js)
+ └── logs: task title, timestamp, assigned user (+2000ms simulated async email delivery)
+```
+
+### 2. Empirical Console Log Evidence (Timestamp Ordering Proof)
+
+Execution log captured from server console during `node test-events.js`:
+
+```text
+[API] ⚡ Response sent (201 Created) at 2026-10-24T02:58:13.210Z for task: "Async Notification Demo Task"
+[Notification Worker] 🔔 Background task-created event received at 2026-10-24T02:58:13.211Z
+   Task Title : "Async Notification Demo Task"
+   Assigned To: event_user_1792810693057@example.com
+   Priority   : high
+
+[REQUEST] DELETE /tasks/6adc1ec5f2cbd8636b4dcd2e - 2026-10-24T02:58:13.213Z
+[API] ⚡ Response sent (200 OK) at 2026-10-24T02:58:13.236Z for deleted task ID: 6adc1ec5f2cbd8636b4dcd2e
+[Audit Worker] 🗑️ Task deleted notification received at 2026-10-24T02:58:13.236Z
+
+[Notification Worker] ✅ Email notification sent for "Async Notification Demo Task"
+   Dispatched: 2026-10-24T02:58:13.211Z
+   Completed : 2026-10-24T02:58:15.212Z (+2000ms after API responded)
+```
+
+> **Proof of Non-Blocking Execution**: The client received HTTP 201 Created at `...13.210Z` (taking only 6.89ms), while the background email delivery finished 2002ms later at `...15.212Z` without stalling subsequent requests (`DELETE /tasks/...` ran in between!).
+
+### 3. Key Viva / Analysis Questions Answered
+
+1. **Why does emitting an event not block the API response, even though both run on the same Node.js process?**
+   Node.js operates on a single-threaded event loop with non-blocking I/O. When `taskEvents.emit()` is called after `res.status(201).json()`, the HTTP response is dispatched immediately. When the listener schedules asynchronous work via `setTimeout`, promises, or network I/O, the callback is offloaded to the event loop's timer queue. The main thread continues processing incoming requests without waiting for the background job to finish.
+2. **What would happen to API response time if the notification logic were placed directly inside the POST route?**
+   If placed synchronously inside the route handler (e.g. `await sendEmail()`), the HTTP response would be blocked until the email completed. API response time would surge from **~7ms to over 2007ms**, severely degrading user experience and tying up Express worker threads.
+3. **Why is EventEmitter a reasonable choice for this scale of application, but not for a production system handling millions of events per day?**
+   `EventEmitter` is an in-memory, process-local publish-subscribe utility requiring zero infrastructure setup. However, it does not persist events (server restarts discard pending events), cannot cross process/server boundaries across clusters, lacks rate-limiting/concurrency controls, and provides no dead-letter queue or retry guarantees. Large production systems require dedicated distributed message brokers like **RabbitMQ**, **Apache Kafka**, or **Redis Streams**.
+
+### 4. Supplementary Problems Implemented
+
+- **`task-deleted` Event**: Registered dedicated audit listener that logs task ID and deletion timestamps.
+- **`error` Event Listener**: Implemented error boundary listener (`taskEvents.on('error', ...)`) to prevent unhandled error events from crashing the Node.js process.
+- **Simulated Slow Worker**: 2-second background delivery demonstrates decoupling of long-running side effects.
+
+---
+
 ## Installation & Running Locally
 
 Follow these steps to run both the frontend and backend development environments simultaneously:
