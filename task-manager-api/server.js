@@ -24,7 +24,8 @@ const startDatabase = async () => {
   try {
     // Attempt standard connection first with a 2-second timeout
     await mongoose.connect(defaultUri, { serverSelectionTimeoutMS: 2000 });
-    console.log('MongoDB connected successfully (Local instance)');
+    const instanceType = defaultUri.includes('mongodb://mongodb') ? 'Docker container service' : 'Local instance';
+    console.log(`MongoDB connected successfully to ${defaultUri} (${instanceType})`);
   } catch (err) {
     console.log('Local MongoDB daemon not running. Booting in-memory MongoDB fallback...');
     try {

@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  # 1. MongoDB Database Service
+  mongodb:
+    image: mongo:6.0
+    container_name: taskmanager-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      # Supplementary Problem: Named volume for persistent data storage across restarts
+      - mongo-data:/data/db
+    networks:
+      - app-network
+
+  # 2. Node.js / Express REST API Backend Service
+  backend:
+    build:
+      context: ./task-manager-api
+      dockerfile: Dockerfile
+    container_name: taskmanager-backend
+    restart: unless-stopped
+    ports:
+      - "5001:5001"
+    environment:
+      # Inter-container communication uses service name 'mongodb'
+      - MONGO_URI=mongodb://mongodb:27017/taskdb
+      - PORT=5001
+      - JWT_SECRET=supersecretjwtkey_docker_compose
+    depends_on:
+      - mongodb
+    networks:
+      - app-network
+
+  # 3. React Frontend Service
+  frontend:
+    build:
+      context: ./student-portfolio
+      dockerfile: Dockerfile
+    container_name: taskmanager-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+
+# Named volume definition for database persistence
+volumes:
+  mongo-data:
+    driver: local
+
+# Isolated custom bridge network for inter-container communication
+networks:
+  app-network:
+    driver: bridge

@@ -164,7 +164,58 @@ Execution log captured from server console during `node test-events.js`:
 
 ---
 
-## Installation & Running Locally
+## Practical 11: Containerization with Docker and Docker Compose
+
+### 1. Architecture: Multi-Container Orchestration
+
+```text
+docker-compose.yml
+ ├── frontend (React + Vite Preview, port 5173)
+ ├── backend  (Node.js / Express REST API, port 5001)
+ └── mongodb  (Official mongo:6.0 image, port 27017, volume: mongo-data)
+
+Network: app-network (bridge)
+ frontend ──► backend ──► mongodb
+ All 3 services start together via: docker-compose up --build
+```
+
+### 2. Single-Command Full-Stack Execution
+
+Start all 3 services (database, backend API, and frontend client) simultaneously:
+
+```bash
+docker-compose up --build
+```
+
+To stop all services and preserve database data:
+```bash
+docker-compose down
+```
+
+To check running container statuses:
+```bash
+docker ps
+```
+
+### 3. Key Viva / Analysis Questions Answered
+
+1. **Why does the backend container need to reference the MongoDB container by its service name (`mongodb`) rather than `localhost`?**
+   In Docker, each container operates in its own isolated network namespace with its own `localhost` (127.0.0.1) loopback interface. Inside the backend container, `localhost` refers only to itself, not to other containers or the host. When containers share a custom bridge network (`app-network`), Docker provides built-in DNS resolution mapping each service name (`mongodb`, `backend`, `frontend`) to its respective dynamic container IP.
+2. **What is the difference between `EXPOSE` in a Dockerfile and the `ports` mapping in `docker-compose.yml`?**
+   `EXPOSE` serves as documentation and metadata indicating which port the containerized process listens on internally; it does **not** make ports accessible from the host system. The `ports` directive in `docker-compose.yml` (`HOST:CONTAINER`, e.g., `"5001:5001"`) establishes an active network NAT rule binding the container port to the host machine so web browsers and tools on the host can access it.
+3. **Why is it considered bad practice to copy `node_modules` into a Docker image instead of running `npm install` inside?**
+   - **Binary Compatibility**: Native C++ node addons (e.g. `bcrypt`, native bindings) compiled on the host OS (such as macOS Darwin) will fail with binary execution errors inside Linux containers.
+   - **Build Context Bloat**: Copying heavy `node_modules` drastically inflates Docker build context transfer time and invalidates layer caching. Running `npm install` inside the container builds clean Linux-compatible binaries.
+
+### 4. Supplementary Problems Implemented
+
+- **`.dockerignore` Optimization**: Excludes `node_modules`, `.env`, and git history to maintain lean build contexts and prevent credential leaks.
+- **Multi-Stage Frontend Build**: Uses a two-stage build (`node:18-alpine AS build` & `AS serve`) to minimize final container image footprints.
+- **Named Volume Persistence**: Mounts `mongo-data:/data/db` so MongoDB data persists across container teardowns and restarts.
+
+---
+
+## Installation & Running Locally (Without Docker)
 
 Follow these steps to run both the frontend and backend development environments simultaneously:
 
