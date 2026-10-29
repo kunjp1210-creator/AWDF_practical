@@ -1,5 +1,5 @@
 import React, { useState, useEffect, lazy, Suspense, memo, useCallback } from 'react';
-import { getTasks, createTask, updateTask, deleteTask, register, login, getMe } from '../api';
+import { getTasks, createTask, updateTask, deleteTask, register, login, getMe, generateAiDescription } from '../api';
 import { lazyWithDelay } from '../utils/lazyWithDelay';
 
 // Supplementary Problem 1: Lazy load heavy analytical chart component on demand
@@ -115,6 +115,10 @@ function Projects() {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState('medium');
+
+  // Practical 13: AI Generation states
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiNotice, setAiNotice] = useState(null);
 
   // Supplementary Feature: Toggle on-demand analytics chunk loading
   const [showAnalytics, setShowAnalytics] = useState(false);
@@ -232,6 +236,58 @@ function Projects() {
     showToast('Logged out successfully.');
   };
 
+  // Practical 13: Handle AI Task Description Generation with Graceful Degradation
+  const handleAiGenerate = async () => {
+    if (!title.trim()) {
+      showToast('Please enter a task title first to generate AI description.', 'error');
+      return;
+    }
+
+    setAiLoading(true);
+    setAiNotice(null);
+
+    try {
+      const data = await generateAiDescription(title.trim());
+      if (data.description) {
+        setDescription(data.description);
+      }
+      if (data.priority) {
+        setPriority(data.priority);
+      }
+
+      if (data.fallback) {
+        setAiNotice({
+          type: 'fallback',
+          text: 'Offline Graceful Fallback: Description generated via heuristic logic. Core application running smoothly without third-party disruption.',
+          reason: data.fallbackReason
+        });
+        showToast('Generated description (Offline Fallback Mode).');
+      } else {
+        setAiNotice({
+          type: 'success',
+          text: 'AI Description generated successfully! You can review and edit it below.'
+        });
+        showToast('✨ AI Description generated!');
+      }
+    } catch (err) {
+      if (err.status === 429) {
+        setAiNotice({
+          type: 'warning',
+          text: err.message || 'AI generation rate limit exceeded. Please wait a moment.'
+        });
+        showToast('Rate limit: please wait a moment.', 'error');
+      } else {
+        setAiNotice({
+          type: 'warning',
+          text: `AI service notice: ${err.message}. Task management remains fully operational.`
+        });
+        showToast('AI service notice. You can type description manually.', 'error');
+      }
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
   // Handle task creation (POST /tasks) with Optimistic UI updates
   const handleCreateSubmit = (e) => {
     e.preventDefault();
@@ -256,6 +312,7 @@ function Projects() {
     setTitle('');
     setDescription('');
     setPriority('medium');
+    setAiNotice(null);
 
     createTask({ title: taskTitle, description: taskDesc, priority: taskPriority })
       .then((savedTask) => {
@@ -442,14 +499,87 @@ function Projects() {
             </Suspense>
           )}
 
-          {/* Add Task Form */}
+          {/* Add Task Form with Practical 13 AI Integration */}
           <div className="task-form-wrapper glass-panel">
-            <h3 style={{ fontSize: '1.2rem', marginBottom: '1.2rem', fontWeight: 600 }}>Create New Database Document</h3>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.2rem', flexWrap: 'wrap', gap: '0.8rem' }}>
+              <h3 style={{ fontSize: '1.2rem', fontWeight: 600, margin: 0 }}>Create New Database Document</h3>
+              <button
+                type="button"
+                onClick={handleAiGenerate}
+                disabled={aiLoading}
+                className="ai-suggest-btn"
+                style={{
+                  background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(168, 85, 247, 0.25))',
+                  border: '1px solid rgba(168, 85, 247, 0.45)',
+                  color: '#c084fc',
+                  borderRadius: '8px',
+                  padding: '0.5rem 1rem',
+                  fontSize: '0.85rem',
+                  cursor: aiLoading ? 'not-allowed' : 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.5rem',
+                  fontWeight: 600,
+                  transition: 'all 0.2s ease',
+                  boxShadow: '0 2px 8px rgba(168, 85, 247, 0.15)'
+                }}
+              >
+                {aiLoading ? (
+                  <>
+                    <span style={{ width: 14, height: 14, border: '2px solid rgba(192, 132, 252, 0.3)', borderTopColor: '#c084fc', borderRadius: '50%', display: 'inline-block', animation: 'spin 0.8s linear infinite' }}></span>
+                    <span>Thinking with AI...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>✨ Generate Description with AI</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            {/* Practical 13: AI Suggestion Notice & Disclaimer */}
+            {aiNotice && (
+              <div
+                style={{
+                  marginBottom: '1rem',
+                  padding: '0.75rem 1rem',
+                  borderRadius: '8px',
+                  fontSize: '0.82rem',
+                  lineHeight: '1.4',
+                  background: aiNotice.type === 'fallback'
+                    ? 'rgba(234, 179, 8, 0.12)'
+                    : aiNotice.type === 'warning'
+                    ? 'rgba(239, 68, 68, 0.12)'
+                    : 'rgba(34, 197, 94, 0.12)',
+                  border: `1px solid ${
+                    aiNotice.type === 'fallback'
+                      ? 'rgba(234, 179, 8, 0.35)'
+                      : aiNotice.type === 'warning'
+                      ? 'rgba(239, 68, 68, 0.35)'
+                      : 'rgba(34, 197, 94, 0.35)'
+                  }`,
+                  color: aiNotice.type === 'fallback'
+                    ? '#fde047'
+                    : aiNotice.type === 'warning'
+                    ? '#fca5a5'
+                    : '#86efac'
+                }}
+              >
+                <div style={{ fontWeight: 600, marginBottom: '0.2rem' }}>
+                  {aiNotice.type === 'fallback' ? '⚠️ Graceful Degradation Active (Offline Heuristic Mode)' : aiNotice.type === 'warning' ? '⏳ Request Notice' : '✨ AI Suggestion Generated'}
+                </div>
+                <div>{aiNotice.text}</div>
+                <div style={{ marginTop: '0.35rem', fontSize: '0.75rem', opacity: 0.85, fontStyle: 'italic' }}>
+                  ℹ️ Disclaimer: AI-generated suggestions should be reviewed and verified by the user before saving.
+                </div>
+              </div>
+            )}
+
             <form onSubmit={handleCreateSubmit} className="task-form-grid">
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
                 <input
                   type="text"
-                  placeholder="Task title (required)..."
+                  placeholder="Task title (required, e.g. 'Setup CI/CD Pipeline')..."
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
                   className="task-input-field"
@@ -457,7 +587,7 @@ function Projects() {
                 />
                 <input
                   type="text"
-                  placeholder="Optional description details..."
+                  placeholder="Editable description (or click 'Generate Description with AI')..."
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   className="task-input-field"

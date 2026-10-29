@@ -123,3 +123,22 @@ export const deleteTask = (id) => {
     return res.json();
   });
 };
+
+// Practical 13: Generate AI task description and suggested priority with graceful degradation
+export const generateAiDescription = (title) => {
+  return fetch(`${BASE_URL}/api/ai/generate-description`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ title })
+  }).then(async (res) => {
+    const data = await res.json();
+    if (!res.ok) {
+      const error = new Error(data.message || data.error || 'Failed to generate AI description');
+      error.status = res.status;
+      error.data = data;
+      throw error;
+    }
+    return data;
+  });
+};
+
