@@ -1,5 +1,7 @@
 # Advanced Web Development Frameworks (AWDF) - Full-Stack Practicals
 
+[![CI Pipeline](https://github.com/kunjp1210-creator/AWDF_practical/actions/workflows/ci.yml/badge.svg)](https://github.com/kunjp1210-creator/AWDF_practical/actions/workflows/ci.yml)
+
 This repository contains the complete practical assignments for **Advanced Web Development Frameworks (ITUE301)** completed by **Kunj Patel**. It is structured as a full-stack monorepo separating the frontend React app and the backend Express/MongoDB REST API.
 
 ## Monorepo Directory Structure
@@ -212,6 +214,154 @@ docker ps
 - **`.dockerignore` Optimization**: Excludes `node_modules`, `.env`, and git history to maintain lean build contexts and prevent credential leaks.
 - **Multi-Stage Frontend Build**: Uses a two-stage build (`node:18-alpine AS build` & `AS serve`) to minimize final container image footprints.
 - **Named Volume Persistence**: Mounts `mongo-data:/data/db` so MongoDB data persists across container teardowns and restarts.
+
+---
+
+## Practical 12: CI/CD Pipeline with GitHub Actions
+
+### 1. CI Pipeline Architecture
+
+```text
+git push origin main / pull request
+ │
+ ▼
+ GitHub Actions Trigger (on: push, pull_request)
+ │
+ ├── Job 1: lint (Syntax & Code Integrity Check)
+ │     ├── Checkout repository (actions/checkout@v4)
+ │     ├── Setup Node.js 18 (actions/setup-node@v4)
+ │     ├── npm ci (task-manager-api)
+ │     └── node --check syntax verification (server, cache, events, listeners)
+ │
+ └── Job 2: build-and-test (needs: lint)
+       ├── Checkout repository (actions/checkout@v4)
+       ├── Setup Node.js 18 (actions/setup-node@v4)
+       ├── npm ci (task-manager-api)
+       ├── Automated API Test Suite (Jest + Supertest)
+       │     ├── [PASS] GET /tasks returns 401 without JWT token
+       │     ├── [PASS] POST /register returns valid JWT auth token
+       │     ├── [PASS] POST /tasks creates database document for authenticated user
+       │     ├── [PASS] GET /tasks returns 200 with tasks array
+       │     └── [PASS] GET /cache-stats returns 200 with cache telemetry
+       ├── npm ci (student-portfolio)
+       └── npm run build (Vite production asset compilation)
+       │
+       ▼
+ Green Checkmark (PASS) or Red X (FAIL) on GitHub
+```
+
+### 2. Local Test Execution Output
+
+```text
+PASS tests/api.test.js
+  Task Management API Test Suite (CI/CD Pipeline)
+    ✓ GET /tasks returns 401 Unauthorized when missing JWT token (27 ms)
+    ✓ POST /register successfully creates account and returns JWT token (122 ms)
+    ✓ POST /tasks creates a new task document for authenticated user (10 ms)
+    ✓ GET /tasks returns 200 OK with list of tasks for authenticated user (20 ms)
+    ✓ GET /cache-stats returns 200 OK with cache telemetry data (4 ms)
+
+Test Suites: 1 passed, 1 total
+Tests:       5 passed, 5 total
+Snapshots:   0 total
+Time:        0.758 s
+```
+
+### 3. Key Viva / Analysis Questions Answered
+
+1. **What is the difference between Continuous Integration and Continuous Deployment, and which one does this practical actually demonstrate?**
+   - **Continuous Integration (CI)**: The automated practice of validating code changes by building, linting, and running automated test suites upon every commit or pull request.
+   - **Continuous Deployment (CD)**: Automatically deploying every code change that passes the CI pipeline directly into staging or production servers without human intervention.
+   - This practical specifically implements and demonstrates **Continuous Integration (CI)** by validating code syntax, executing Jest tests against the backend API, and testing the frontend production build.
+2. **Why does running tests automatically on every push catch problems earlier than testing manually before a release?**
+   Automated testing on every push establishes an immediate feedback loop. Instead of discovering breaking changes days or weeks later during pre-release testing (where pinpointing the regression across hundreds of modified files is costly), the CI pipeline flags errors within seconds of pushing, pinpointing the exact commit and test assertion that failed.
+3. **What would happen to the pipeline if the test file path were incorrect — would the workflow fail at the same step as a genuine test failure?**
+   No. An assertion failure occurs during test execution inside the test runner (`expect(received).toBe(expected)` failing inside `tests/api.test.js`). If the test path or configuration is incorrect, the runner fails at the test discovery phase (`No tests found matching pattern` or module resolution error), resulting in a runner configuration exit error rather than a logical test failure.
+
+### 4. Supplementary Features Implemented
+
+- **Dual-Job Pipeline**: Separate `lint` job runs first, gatekeeping the dependent `build-and-test` job.
+- **Pull Request Triggering**: Pipeline automatically triggers on both `push` and `pull_request` branches targeting `main`.
+- **Status Badge**: Real-time CI Pipeline badge embedded at the top of the README.
+- **Multiple Endpoint Coverage**: Automated test suite tests authentication, CRUD persistence, and in-memory cache telemetry.
+
+---
+
+## Practical 13: AI API Integration into a Web Application
+
+Practical 13 extends the full-stack Task Management application with an AI-powered assistant that auto-generates task descriptions and suggests priority levels, backed by server-side API security, rate limiting, and graceful degradation fallback.
+
+### 1. Architecture & Information Flow
+
+```text
+React Frontend (student-portfolio)
+ │ 
+ │ 1. User enters Task Title
+ │ 2. Clicks "✨ Generate Description with AI"
+ ▼
+Express Backend (task-manager-api)
+ │ Route: POST /api/ai/generate-description
+ │ 
+ ├── 3. Rate Limiter Middleware (max 1 AI request per 10s per client)
+ ├── 4. Read process.env.OPENAI_API_KEY (Server-side ONLY; never in browser)
+ │
+ ├── [A] API Key Configured & Online:
+ │     ▼
+ │   Calls OpenAI API (gpt-4o-mini)
+ │     │
+ │     ▼
+ │   Returns JSON { description, priority, fallback: false }
+ │
+ └── [B] API Key Missing, Invalid, or Provider Outage (Graceful Degradation):
+       ▼
+     Catch error inside try/catch block
+       │
+       ▼
+     Offline Heuristic Generator generates context-aware description & priority
+       │
+       ▼
+     Returns status 200 JSON { description, priority, fallback: true, fallbackReason, disclaimer }
+ │
+ ▼
+React Frontend UI:
+ - Populates editable Description field (student can review, accept, or edit)
+ - Suggests Priority (Low, Medium, High)
+ - Displays clear AI Disclaimer: "AI-generated suggestion. Please review before saving."
+ - Displays Graceful Degradation notice if operating in offline fallback mode
+ - Core task management NEVER crashes!
+```
+
+### 2. Endpoints Added
+
+| Method | Endpoint | Description | Access Control |
+|---|---|---|---|
+| `POST` | `/api/ai/generate-description` | Generates a 1-2 sentence task description and suggested priority level from a task title. Features rate-limiting and offline heuristic fallback. | Public / Rate-limited |
+| `POST` | `/ai/generate-description` | Alias route for convenience | Public / Rate-limited |
+
+### 3. Key Viva / Analysis Questions Answered
+
+1. **Why must the AI API key be called from the backend rather than directly from the React frontend?**
+   - **Credential Security**: React client code runs directly inside user browsers. Any API key embedded or bundled into frontend JavaScript is visible in plaintext via Browser DevTools (Network, Console, and Sources tabs).
+   - **Abuse Prevention**: Exposing keys allows malicious actors to scrape credentials, bypass billing quotas, trigger denial-of-service, or run thousands of unauthorized requests at the developer's financial expense. By isolating the call inside an Express route, the key stays in server `.env` memory and is never transmitted over client network connections.
+2. **What does 'graceful degradation' mean in this context, and why does it matter for a feature that depends on a third-party service outside your control?**
+   - **Definition**: Graceful degradation is an architectural pattern where an application continues to deliver core functionality when an external non-essential service or dependency fails, slows down, or runs out of quota.
+   - **Significance**: Third-party APIs (OpenAI, Gemini) are outside our infrastructure control. If our task creation form crashed whenever OpenAI experienced latency, downtime, or invalid credentials, the entire web application would be unusable. By catching exceptions and returning an offline rule-based heuristic description with `fallback: true`, the user can continue creating, editing, and managing tasks uninterrupted.
+3. **What are the privacy and governance implications of sending task data to an external AI API, and what kind of data should never be sent this way?**
+   - **Privacy Implications**: Data sent to external AI APIs crosses corporate and regional borders, potentially being logged, inspected, or retained by third-party model providers. Organizations must comply with data protection regulations such as GDPR, HIPAA, and DPDP.
+   - **Data That Must NEVER Be Sent**:
+     - *Personally Identifiable Information (PII)*: Social Security numbers, phone numbers, home addresses, government IDs.
+     - *Authentication Credentials*: Passwords, API tokens, JWT secrets, private SSH keys.
+     - *Protected Health Information (PHI)*: Medical records, health conditions, prescription details.
+     - *Confidential Proprietary Assets*: Non-public source code, financial audits, insider trade secrets.
+
+### 4. Supplementary & Bonus Features Implemented
+
+- **Loading Indicator**: Interactive spinner and "Thinking with AI..." button animation during active generation requests.
+- **Client Rate Limiting**: In-memory rate limiter prevents spam and runaway API billing (returns HTTP 429 with remaining cooldown seconds).
+- **Mandatory AI Disclaimer**: Visible UI notice warning users that suggestions are machine-generated and must be verified before saving.
+- **Fully Editable Suggestions**: AI outputs directly populate two-way data-bound React inputs, allowing students full manual edit control before persisting to MongoDB.
+- **Automated Test Suite Expansion**: Jest + Supertest test suite expanded from 5 to 8 tests, covering input validation, rate limiting, and graceful degradation fallback.
+
 
 ---
 

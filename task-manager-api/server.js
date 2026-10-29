@@ -363,6 +363,143 @@ app.post('/cache-flush', (req, res) => {
   });
 });
 
+// ==========================================
+// Practical 13: AI API Integration Route & Graceful Degradation
+// ==========================================
+const OpenAI = require('openai');
+
+// In-memory rate limiting map (max 1 AI request per 10 seconds per client)
+const aiRateLimitMap = new Map();
+const AI_RATE_LIMIT_WINDOW_MS = 10000;
+
+const aiRateLimiter = (req, res, next) => {
+  if (process.env.NODE_ENV === 'test' && req.headers['x-bypass-ratelimit']) {
+    return next();
+  }
+  const clientKey = req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'client';
+  const now = Date.now();
+  const lastRequest = aiRateLimitMap.get(clientKey);
+
+  if (lastRequest && (now - lastRequest) < AI_RATE_LIMIT_WINDOW_MS) {
+    const remainingSec = Math.ceil((AI_RATE_LIMIT_WINDOW_MS - (now - lastRequest)) / 1000);
+    return res.status(429).json({
+      error: 'Too Many Requests',
+      message: `AI generation rate limit exceeded. Please wait ${remainingSec}s before requesting another suggestion.`,
+      fallback: true,
+      retryAfter: remainingSec
+    });
+  }
+
+  aiRateLimitMap.set(clientKey, now);
+  next();
+};
+
+function generateRuleBasedFallback(title) {
+  const lower = title.toLowerCase();
+  if (lower.includes('bug') || lower.includes('fix') || lower.includes('error') || lower.includes('issue')) {
+    return `Investigate, isolate, and resolve root cause for "${title}". Verify regression with automated tests.`;
+  }
+  if (lower.includes('api') || lower.includes('route') || lower.includes('backend') || lower.includes('server')) {
+    return `Implement and test backend REST endpoints for "${title}". Ensure schema validation and error handling.`;
+  }
+  if (lower.includes('auth') || lower.includes('login') || lower.includes('jwt') || lower.includes('security')) {
+    return `Establish secure authentication handling for "${title}". Enforce token validation and protected middleware.`;
+  }
+  if (lower.includes('test') || lower.includes('ci') || lower.includes('pipeline') || lower.includes('action')) {
+    return `Configure automated test suites and continuous integration triggers for "${title}" to ensure regression safety.`;
+  }
+  if (lower.includes('ui') || lower.includes('component') || lower.includes('frontend') || lower.includes('react')) {
+    return `Design responsive interface components for "${title}" with accessibility, loading indicators, and user feedback.`;
+  }
+  return `Plan, execute, and verify key deliverables for "${title}". Review code quality and document implementation steps.`;
+}
+
+function suggestRuleBasedPriority(title) {
+  const lower = title.toLowerCase();
+  if (lower.includes('urgent') || lower.includes('critical') || lower.includes('security') || lower.includes('crash') || lower.includes('fix') || lower.includes('bug')) {
+    return 'high';
+  }
+  if (lower.includes('optimize') || lower.includes('refactor') || lower.includes('feature') || lower.includes('api')) {
+    return 'medium';
+  }
+  return 'low';
+}
+
+const handleGenerateDescription = async (req, res) => {
+  const title = req.body && req.body.title ? String(req.body.title).trim() : '';
+
+  if (!title) {
+    return res.status(400).json({
+      error: 'Validation Error',
+      message: 'Task title is required to generate description.'
+    });
+  }
+
+  const apiKey = process.env.OPENAI_API_KEY;
+  const isKeyConfigured = apiKey && apiKey !== 'your_openai_api_key_here' && apiKey.startsWith('sk-');
+
+  try {
+    if (!isKeyConfigured) {
+      throw new Error('OPENAI_API_KEY is not configured or uses a placeholder key.');
+    }
+
+    const client = new OpenAI({ apiKey });
+    const completion = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: 'You are an AI assistant in a task management app. Generate a clear, actionable, 1-2 sentence description and suggest a priority (low, medium, high) based on the task title. Respond in valid JSON format with keys "description" and "priority".'
+        },
+        {
+          role: 'user',
+          content: `Write a short task description and suggest a priority level for: "${title}"`
+        }
+      ],
+      temperature: 0.7,
+      max_tokens: 150
+    });
+
+    let description = '';
+    let priority = 'medium';
+
+    try {
+      const parsed = JSON.parse(completion.choices[0].message.content);
+      description = parsed.description || completion.choices[0].message.content;
+      if (['low', 'medium', 'high'].includes(parsed.priority?.toLowerCase())) {
+        priority = parsed.priority.toLowerCase();
+      }
+    } catch (parseErr) {
+      description = completion.choices[0].message.content.trim();
+      priority = suggestRuleBasedPriority(title);
+    }
+
+    return res.status(200).json({
+      description,
+      priority,
+      fallback: false,
+      model: 'gpt-4o-mini',
+      disclaimer: 'AI-generated suggestion. Please review and modify before saving.'
+    });
+  } catch (err) {
+    console.warn(`[AI SERVICE] External AI call failed or unavailable (${err.message}). Activating graceful degradation fallback.`);
+    const fallbackDesc = generateRuleBasedFallback(title);
+    const fallbackPriority = suggestRuleBasedPriority(title);
+
+    return res.status(200).json({
+      description: fallbackDesc,
+      priority: fallbackPriority,
+      fallback: true,
+      fallbackReason: err.message,
+      disclaimer: 'AI-generated suggestion (offline heuristic fallback). Please review and modify before saving.'
+    });
+  }
+};
+
+app.post('/api/ai/generate-description', aiRateLimiter, handleGenerateDescription);
+app.post('/ai/generate-description', aiRateLimiter, handleGenerateDescription);
+
+
 // Endpoint to deliberately trigger an error to test the global error handling middleware
 app.get('/trigger-error', (req, res, next) => {
   const err = new Error('Deliberate Server Crash triggered for error handler verification.');
@@ -405,9 +542,13 @@ app.use((err, req, res, next) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`=========================================`);
-  console.log(`Server successfully started on port ${PORT}`);
-  console.log(`Interactive API Visualizer: http://localhost:${PORT}`);
-  console.log(`=========================================`);
-});
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(PORT, () => {
+    console.log(`=========================================`);
+    console.log(`Server successfully started on port ${PORT}`);
+    console.log(`Interactive API Visualizer: http://localhost:${PORT}`);
+    console.log(`=========================================`);
+  });
+}
+
+module.exports = app;
